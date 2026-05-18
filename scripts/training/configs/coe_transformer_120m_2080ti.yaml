@@ -1,0 +1,77 @@
+# ─────────────────────────────────────────────────────────────────────────
+# CoE-Transformer-CTC SMALL (~120M, weight-shared × M=5) — 2080 Ti debug.
+# 120M activations are already large; we shrink max_duration aggressively.
+# ─────────────────────────────────────────────────────────────────────────
+
+output_dir: outputs/coe_transformer_120m_3000bpe
+
+model:
+  arch: transformer
+  size: small
+  head_dropout: 0.0
+  blank_idx: 0
+
+coe:
+  num_enc_chains: 5
+  time_mask_ratios: [0.1, 0.1, 0.1, 0.1, 0.1]
+  loss_alphas: null
+  pre_enc_layer_idx: -1
+  pre_enc_feature_detach: false
+  head_share: false
+
+data:
+  num_features: 80
+  manifest_dir: downloads/manifests/libri100
+  feats_dir: downloads/feats/libri100_fbank80
+  manifest_prefix: librispeech
+  bpe_model: downloads/bpe/libri100_bpe3000/spm.model
+  train_parts: ["train-clean-100"]
+  dev_part: dev-other
+  test_parts: ["test-clean", "test-other", "dev-clean", "dev-other"]
+  max_duration: 15.0            # baseline 60 / ×M
+  num_buckets: 30
+  min_seconds: 1.0
+  max_seconds: 15.0
+  apply_spec_augment: false
+  spec_aug_num_freq_masks: 2
+  spec_aug_freq_mask_param: 27
+  spec_aug_num_time_masks: 5
+  spec_aug_time_mask_param: 60
+  spec_aug_time_mask_ratio: 0.04
+  per_utt_mvn: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+
+optim:
+  name: adamw
+  lr: 1.0e-3
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  weight_decay: 1.0e-2
+  fused: true
+  scheduler: warmup_cosine
+  warmup_steps: 10000
+  max_steps: 100000
+  min_lr_ratio: 0.01
+  grad_accum_steps: 32          # baseline 8 × M=4
+  max_grad_norm: 5.0
+
+amp:
+  enabled: false
+  dtype: bfloat16
+
+checkpoint:
+  save_every_steps: 2000
+  rolling_keep: 3
+  top_k: 5
+
+validation:
+  every_epochs: 1
+  num_samples: 10
+
+health:
+  interval_steps: 50
+
+seed: 42
+distributed_backend: nccl

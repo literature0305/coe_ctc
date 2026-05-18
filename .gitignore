@@ -1,0 +1,49 @@
+# Runtime artifacts
+downloads/
+outputs/
+*.log
+*.tfevents.*
+events.out.*
+errlog*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Lhotse / data byproducts (when user runs preprocess outside downloads/)
+*.jsonl.gz
+*.h5
+*.lca
+*.ark
+*.scp
+spm.model
+spm.vocab
+
+# Job submission scratch
+.ssub_jobs/

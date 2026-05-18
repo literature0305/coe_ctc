@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────────────────────────────────
+# CoE-Transformer-CTC TINY (~30M, weight-shared encoder × M=5 chains) — 2080 Ti.
+# Effective batch ≈ max_duration × grad_accum (~720s) matches the baseline
+# transformer_30m_2080ti, while activation memory ≈ ×M (no detach).
+# ─────────────────────────────────────────────────────────────────────────
+
+output_dir: outputs/coe_transformer_30m_3000bpe
+
+model:
+  arch: transformer
+  size: tiny                    # d_model=256, layers=12, heads=4, ff=1024
+  head_dropout: 0.0
+  blank_idx: 0
+
+coe:
+  num_enc_chains: 5
+  time_mask_ratios: [0.1, 0.1, 0.1, 0.1, 0.1]
+  loss_alphas: null             # null → derive alpha_M=1, alpha_{m-1}=alpha_m*0.5, normalize
+  pre_enc_layer_idx: -1         # 0-based; -1 = last encoder layer
+  pre_enc_feature_detach: false
+  head_share: false
+
+data:
+  num_features: 80
+  manifest_dir: downloads/manifests/libri100
+  feats_dir: downloads/feats/libri100_fbank80
+  manifest_prefix: librispeech
+  bpe_model: downloads/bpe/libri100_bpe3000/spm.model
+  train_parts: ["train-clean-100"]
+  dev_part: dev-other
+  test_parts: ["test-clean", "test-other", "dev-clean", "dev-other"]
+  max_duration: 90.0            # baseline 360 / M=4 (rough; CoE adds ~×M activation)
+  num_buckets: 30
+  min_seconds: 1.0
+  max_seconds: 17.0
+  apply_spec_augment: false     # CoE owns freq + cumulative time masking
+  spec_aug_num_freq_masks: 2
+  spec_aug_freq_mask_param: 27
+  spec_aug_num_time_masks: 5
+  spec_aug_time_mask_param: 50
+  spec_aug_time_mask_ratio: 0.04
+  per_utt_mvn: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+
+optim:
+  name: adamw
+  lr: 1.5e-3
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  weight_decay: 1.0e-2
+  fused: true
+  scheduler: warmup_cosine
+  warmup_steps: 8000
+  max_steps: 80000
+  min_lr_ratio: 0.01
+  grad_accum_steps: 8           # baseline 2 × ~M to preserve effective batch
+  max_grad_norm: 5.0
+
+amp:
+  enabled: false                # fp32 fastest on Turing (sm_75)
+  dtype: bfloat16
+
+checkpoint:
+  save_every_steps: 2000
+  rolling_keep: 3
+  top_k: 5
+
+validation:
+  every_epochs: 1
+  num_samples: 10
+
+health:
+  interval_steps: 50
+
+seed: 42
+distributed_backend: nccl

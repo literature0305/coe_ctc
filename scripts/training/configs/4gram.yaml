@@ -1,0 +1,17 @@
+# ─────────────────────────────────────────────────────────────────────────
+# KenLM 4-gram training config for LibriSpeech-style corpora.
+#
+# Matches the openslr-11 4-gram.arpa.gz settings (Heafield et al. defaults
+# used by the LibriSpeech LM challenge).
+# ─────────────────────────────────────────────────────────────────────────
+
+order: 4
+prune: [0, 0, 1, 1]                 # discard singletons in 3-gram and 4-gram tiers
+discount_fallback: true              # KenLM needs this on small / repetitive corpora
+output_dir: downloads/lms
+arpa_name: custom_4gram.arpa         # → custom_4gram.klm after build_binary
+keep_arpa: true                      # set false to delete the ARPA after binary is produced
+text_arpa_only: false                # set true to skip build_binary entirely
+
+# Optional metadata (for bookkeeping, not consumed by lmplz)
+description: "Custom 4-gram trained from LibriSpeech LM corpus"

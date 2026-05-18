@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Libri-light evaluation config.
+#
+# libri-light is unlabeled; we evaluate against the LibriSpeech dev / test
+# splits using the BPE model from the libri960 prep. Set data_alias to
+# libri960 unless you have a labeled fork of libri-light.
+# ─────────────────────────────────────────────────────────────────────────
+
+data_alias: libri960              # libri-light is unlabeled — use libri960's labels for evaluation
+
+splits:
+  - test-clean
+  - test-other
+  - dev-clean
+  - dev-other
+
+max_duration: 350.0
+
+data:
+  num_buckets: 20
+  min_seconds: 0.0
+  max_seconds: 30.0
+  apply_spec_augment: false
+  per_utt_mvn: true

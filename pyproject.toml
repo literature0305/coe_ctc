@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coe-ctc"
+version = "0.1.0"
+description = "SOTA CTC ASR baseline (Conformer / Zipformer / Transformer) on LibriSpeech with Lhotse."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "mun-hak.lee" },
+]
+license = { text = "Apache-2.0" }
+
+# ─────────────────────────────────────────────────────────────────────
+# Runtime dependencies
+# ─────────────────────────────────────────────────────────────────────
+# torch / torchaudio are pinned to a recent stable line that supports
+# torch.nn.functional.scaled_dot_product_attention with Flash backend on
+# Ampere+ GPUs (A100, H100). For 2080 Ti (sm_75) Flash falls back to
+# memory-efficient attention automatically.
+dependencies = [
+  "torch>=2.2",
+  "torchaudio>=2.2",
+  "numpy>=1.24,<2.3",
+  "lhotse>=1.27",
+  "sentencepiece>=0.2",
+  "pyyaml>=6.0",
+  "tqdm>=4.66",
+  "tensorboard>=2.14",
+  "matplotlib>=3.7",
+  "jiwer>=3.0",        # WER / CER reference implementation
+  "pyctcdecode>=0.5",  # CTC beam search + KenLM rescoring
+  "kenlm>=0.2",        # N-gram LM scoring (pip install https://github.com/kpu/kenlm/archive/master.zip)
+  "soundfile>=0.12",
+  "librosa>=0.10",     # optional fallback for audio loading
+  "psutil>=5.9",       # GPU/CPU memory tracking in health report
+  "GPUtil>=1.4",       # optional, used only if available
+]
+
+# ─────────────────────────────────────────────────────────────────────
+# Optional extras
+# ─────────────────────────────────────────────────────────────────────
+[project.optional-dependencies]
+# k2 + icefall enables the optional fast WFST decoder; install only if you
+# want exact icefall-parity decoding. Without it, we fall back to pyctcdecode.
+k2 = [
+  "k2>=1.24",
+]
+# Zipformer reference implementation hooks (icefall is an optional reference;
+# we ship a self-contained reimplementation, but icefall is handy for ablations).
+icefall = [
+  "icefall @ git+https://github.com/k2-fsa/icefall@master",
+]
+dev = [
+  "pytest>=7",
+  "pytest-xdist>=3",
+  "ruff>=0.4",
+  "black>=24.0",
+  "mypy>=1.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/literature0305/coe-ctc"
+
+# ─────────────────────────────────────────────────────────────────────
+# Setuptools layout
+# ─────────────────────────────────────────────────────────────────────
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["coe_ctc*"]
+
+[tool.setuptools.package-data]
+coe_ctc = ["py.typed"]
+
+# ─────────────────────────────────────────────────────────────────────
+# Tooling
+# ─────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 110
+target-version = ["py39", "py310", "py311"]
+
+[tool.pytest.ini_options]
+addopts = "-ra -q"
+testpaths = ["tests"]

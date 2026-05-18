@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Conformer-CTC LARGE (~800M) — A100 × 8 profile.
+# Target: LibriSpeech 960h, BPE 3000.
+# Expected: WER ~1.9-2.0 % test-clean, ~4.2-4.5 % test-other (our SOTA goal).
+#
+# 800M needs aggressive bf16 + grad accumulation; effective batch ≈ 8 × 150s × 2 ≈ 2400s.
+# ─────────────────────────────────────────────────────────────────────────
+
+output_dir: outputs/ctc_conformer_800m_3000bpe
+
+model:
+  arch: conformer
+  size: large                    # d_model=768, layers=24, heads=12, ff=3072
+  head_dropout: 0.0
+  blank_idx: 0
+  dropout: 0.1
+
+data:
+  num_features: 80
+  manifest_dir: downloads/manifests/libri960
+  feats_dir: downloads/feats/libri960_fbank80
+  manifest_prefix: librispeech
+  bpe_model: downloads/bpe/libri960_bpe3000/spm.model
+  train_parts: ["train-clean-100", "train-clean-360", "train-other-500"]
+  dev_part: dev-other
+  test_parts: ["test-clean", "test-other", "dev-clean", "dev-other"]
+  max_duration: 150.0            # 800M with bf16 ≈ 60-70 GB on A100 80GB
+  num_buckets: 30
+  min_seconds: 1.0
+  max_seconds: 20.0
+  apply_spec_augment: true
+  spec_aug_num_freq_masks: 2
+  spec_aug_freq_mask_param: 27
+  spec_aug_num_time_masks: 10
+  spec_aug_time_mask_param: 100
+  spec_aug_time_mask_ratio: 0.05
+  per_utt_mvn: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+
+optim:
+  name: adamw
+  lr: 1.5e-3                     # do not exceed; 800M is brittle
+  betas: [0.9, 0.98]
+  eps: 1.0e-9
+  weight_decay: 1.0e-2
+  fused: true
+  scheduler: warmup_cosine
+  warmup_steps: 40000
+  max_steps: 800000
+  min_lr_ratio: 0.01
+  grad_accum_steps: 2
+  max_grad_norm: 5.0
+
+amp:
+  enabled: true
+  dtype: bfloat16
+
+checkpoint:
+  save_every_steps: 5000
+  rolling_keep: 3
+  top_k: 15                       # average more for 800M to smooth noise
+
+validation:
+  every_epochs: 1
+  num_samples: 10
+
+health:
+  interval_steps: 100
+
+seed: 42
+distributed_backend: nccl
