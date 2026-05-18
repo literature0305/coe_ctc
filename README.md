@@ -1,8 +1,14 @@
-# coe-ctc — SOTA CTC ASR Baseline on LibriSpeech
+# coe-ctc — SOTA CTC ASR Baseline + Chain-of-Encoders on LibriSpeech
 
-End-to-end CTC speech recognition baseline targeting **SOTA published numbers**
-on LibriSpeech (100h subset / 960h full / libri-light optional). Designed for
-AI-conference paper experiments (Chain-of-Encoders, CoE).
+End-to-end CTC speech recognition on LibriSpeech (100h subset / 960h full /
+libri-light optional). The repo ships **two** training paths from the same
+encoder code:
+
+1. **Plain CTC baselines** — Transformer / Conformer / Zipformer, targeting
+   published SOTA numbers (see table below).
+2. **Chain-of-Encoders (CoE)** — a weight-shared, multi-pass encoder with a
+   cumulative time-mask schedule and inter-pass K/V conditioning. This is the
+   proposed method for the accompanying paper.
 
 | Reference framework | Borrowed style                                              |
 | ------------------- | ----------------------------------------------------------- |
@@ -12,7 +18,19 @@ AI-conference paper experiments (Chain-of-Encoders, CoE).
 
 ---
 
-## Target Performance (SOTA reference — LibriSpeech 960h, **no** external LM)
+## Performance
+
+> **Important.** The two tables below are *different things*. The first is
+> the published SOTA we want to match/beat. The second is what *this repo*
+> currently produces — and as of today **nothing has been measured yet**
+> (no training run has been completed end-to-end). Numbers will be filled
+> in once `scripts/evaluation/run_evaluation.sh` is executed against a
+> trained checkpoint.
+
+### A. Target performance (SOTA reference — LibriSpeech 960h, **no** external LM)
+
+These are the published numbers we are aiming for. **Not** numbers produced by
+this repo.
 
 | Architecture       | Params | dev-clean | dev-other | test-clean | test-other | Reference / Notes                       |
 | ------------------ | -----: | --------: | --------: | ---------: | ---------: | --------------------------------------- |
@@ -32,6 +50,43 @@ AI-conference paper experiments (Chain-of-Encoders, CoE).
 | Conformer-CTC M  |  120M  |   5.4 %    |  14.5 %    | IceFall 100h subset          |
 
 Targets are continuously updated in `CLAUDE.md`.
+
+### B. Current implemented performance (this repo)
+
+Status as of the latest commit: **code complete, not yet measured.** No
+training run has finished; the cells below will be populated by running
+`scripts/evaluation/run_evaluation.sh` against the first trained checkpoint
+for each config.
+
+LibriSpeech 960h, no LM:
+
+| Config (this repo)                  | Arch        | Params | dev-clean | dev-other | test-clean | test-other | Status     |
+| ----------------------------------- | ----------- | -----: | --------: | --------: | ---------: | ---------: | ---------- |
+| `transformer_120m_a100x4.yaml`      | Transformer |  120M  |     —     |     —     |     —      |     —      | not measured |
+| `conformer_120m_a100x4.yaml`        | Conformer   |  120M  |     —     |     —     |     —      |     —      | not measured |
+| `conformer_300m_a100x8.yaml`        | Conformer   |  300M  |     —     |     —     |     —      |     —      | not measured |
+| `conformer_800m_a100x8.yaml`        | Conformer   |  800M  |     —     |     —     |     —      |     —      | not measured |
+| `zipformer_120m_a100x4.yaml`        | Zipformer   |  120M  |     —     |     —     |     —      |     —      | not measured |
+| `zipformer_300m_a100x8.yaml`        | Zipformer   |  300M  |     —     |     —     |     —      |     —      | not measured |
+| `coe_conformer_120m_a100x4.yaml`    | CoE-Conformer | 120M |     —     |     —     |     —      |     —      | not measured |
+| `coe_conformer_300m_a100x8.yaml`    | CoE-Conformer | 300M |     —     |     —     |     —      |     —      | not measured |
+| `coe_zipformer_120m_a100x4.yaml`    | CoE-Zipformer | 120M |     —     |     —     |     —      |     —      | not measured |
+| `coe_zipformer_300m_a100x8.yaml`    | CoE-Zipformer | 300M |     —     |     —     |     —      |     —      | not measured |
+
+LibriSpeech 100h (debug / small-scale), no LM:
+
+| Config (this repo)                  | Arch          | Params | test-clean | test-other | Status       |
+| ----------------------------------- | ------------- | -----: | ---------: | ---------: | ------------ |
+| `transformer_30m_2080ti.yaml`       | Transformer   |   30M  |     —      |     —      | not measured |
+| `transformer_120m_2080ti.yaml`      | Transformer   |  120M  |     —      |     —      | not measured |
+| `conformer_30m_2080ti.yaml`         | Conformer     |   30M  |     —      |     —      | not measured |
+| `coe_transformer_30m_2080ti.yaml`   | CoE-Transformer | 30M  |     —      |     —      | not measured |
+| `coe_transformer_120m_2080ti.yaml`  | CoE-Transformer | 120M |     —      |     —      | not measured |
+| `coe_conformer_30m_2080ti.yaml`     | CoE-Conformer |   30M  |     —      |     —      | not measured |
+
+Once a run completes, fill in WER (and CER / latency / RTF — emitted by the
+evaluation script for every split) and update the "Status" column to the
+checkpoint short-hash or output dir.
 
 ---
 
@@ -236,6 +291,87 @@ Pretrained ARPAs from openslr-11 can be dropped into `downloads/lms/` as well.
 
 ---
 
+## Chain-of-Encoders (CoE)
+
+CoE is the proposed method of the accompanying paper. **A single encoder is
+reused for M passes per training step** with a cumulative time-mask schedule
+and inter-pass conditioning via K/V concatenation.
+
+![CoE architecture](figure/COE.drawio.png)
+
+### Method
+
+For each utterance during training:
+
+1. A **single** frequency mask `FreqMask(X, r_f)` is sampled and shared across
+   all passes.
+2. Per-pass time masks are drawn so the masking is **cumulative**: pass `m`
+   sees the union of overlays `m..M-1`. Pass 0 is most-masked; pass `M-1` is
+   least-masked. Inference uses no masking.
+3. Pass `m` runs the encoder on its masked input and produces logits `Z_m`.
+   For `m ≥ 1`, the encoder additionally attends to the previous pass's
+   selected layer output via per-layer K/V concatenation along the time axis
+   (`pre_enc_layer_idx`, default = last layer; ignored by Zipformer because
+   it is multi-rate — the final stack output is used instead).
+4. Each pass has its own CTC loss `loss_m` (or one shared head if
+   `head_share: true`). Total loss is a normalized weighted sum
+   `loss_total = Σ α_m · loss_m`. By default `α_m` is geometrically rising
+   (`α_{m-1} = α_m / 2`) and normalized to sum to 1, so the cleanest pass
+   dominates while early passes still contribute gradient signal.
+
+The encoder parameters are **shared** across passes — the only per-pass
+state is the masking and the optional per-pass CTC head.
+
+### Configuration
+
+CoE is enabled purely by adding a `coe:` section to the training YAML; no
+code changes needed. Defaults match the paper:
+
+```yaml
+coe:
+  num_enc_chains: 5             # M, number of weight-shared passes
+  time_mask_ratios: [0.1, 0.1, 0.1, 0.1, 0.1]   # per-pass overlay ratio (length M)
+  loss_alphas: null             # null → geometric (α_{m-1}=α_m/2), normalized
+  pre_enc_layer_idx: -1         # which encoder layer feeds the next pass's K/V (Zipformer ignores)
+  pre_enc_feature_detach: false # detach pre-enc features (gradient stop)
+  head_share: false             # one CTC head per pass; set true for a single shared head
+```
+
+The trainer auto-detects the `coe:` section, builds a `CoeModel` via
+`coe_ctc.models.builder.build_coe_model(...)`, and forces
+`data.apply_spec_augment: false` because CoE owns its own masking. The
+health report adds `CoE chains`, `CoE alphas`, `CoE r_m`, `CoE pre-layer`,
+`CoE detach`, and `CoE head_share` rows to the model-summary block.
+
+### Memory & throughput notes
+
+- Each pass costs roughly one full encoder forward, so step cost is ~M× the
+  baseline. The CoE configs compensate by dividing `data.max_duration` by
+  `M` and multiplying `optim.grad_accum_steps` by `M`, keeping effective
+  batch and per-step memory roughly constant against the matching baseline.
+- `pre_enc_feature_detach: true` cuts memory further by stopping gradients
+  through the previous pass's K/V stream — useful when M ≥ 5 on smaller
+  GPUs. Default is `false` (full backprop through all passes).
+- Zipformer's multi-rate stacks make `pre_enc_layer_idx` irrelevant; the
+  final downsampled output is used for inter-pass conditioning regardless.
+
+### Training and evaluation
+
+Train with any of the `coe_*.yaml` configs — same `train.sh` entry point:
+
+```bash
+bash scripts/training/train.sh \
+    --data libri960 \
+    --mode job --ngpu 8 --gpu-type A100 \
+    --config scripts/training/configs/coe_conformer_300m_a100x8.yaml
+```
+
+Evaluation is identical to the plain CTC path — only the **last** (least-
+masked) pass is used at inference, so `run_evaluation.sh` works on a CoE
+checkpoint without any flag changes.
+
+---
+
 ## Repo layout
 
 See `CLAUDE.md` for the full design notes. Key directories:
@@ -243,7 +379,7 @@ See `CLAUDE.md` for the full design notes. Key directories:
 ```
 src/coe_ctc/
 ├── data/         # LibriSpeech manifests, fBank, BPE
-├── models/       # subsampling, attention, transformer, conformer, zipformer
+├── models/       # subsampling, attention, transformer, conformer, zipformer, coe
 ├── training/     # loop, health report, validation, checkpointing
 ├── decoding/     # greedy, beam, ngram, WER/CER
 ├── lm/           # KenLM wrapper
@@ -251,8 +387,11 @@ src/coe_ctc/
 
 scripts/
 ├── preprocess/run_preprocess.sh
-├── training/{train.sh,train_ngram.sh,configs/*.yaml}
+├── training/{train.sh,train_ngram.sh,configs/{<arch>_*.yaml, coe_<arch>_*.yaml}}
 └── evaluation/{run_evaluation.sh,configs/{libri,libri_light}.yaml}
+
+figure/
+└── COE.drawio.png    # Chain-of-Encoders architecture diagram
 ```
 
 ---
@@ -275,6 +414,8 @@ All configs live in `scripts/training/configs/`. They are written so that the
 **same encoder code** powers tiny/small/medium/large; the YAML only tweaks
 hyperparameters, batch size, learning rate, schedule length and AMP.
 
+Plain CTC baselines (no `coe:` section):
+
 | Config                              | Arch        | Size   | Params | Hardware     | LibriSpeech    |
 | ----------------------------------- | ----------- | ------ | -----: | ------------ | -------------- |
 | `transformer_30m_2080ti.yaml`       | Transformer | tiny   |   30M  | 2080 Ti × 1  | 100h, BPE 300  |
@@ -286,6 +427,20 @@ hyperparameters, batch size, learning rate, schedule length and AMP.
 | `conformer_800m_a100x8.yaml`        | Conformer   | large  |  800M  | A100 × 8     | 960h, BPE 3000 |
 | `zipformer_120m_a100x4.yaml`        | Zipformer   | small  |  120M  | A100 × 4     | 960h, BPE 3000 |
 | `zipformer_300m_a100x8.yaml`        | Zipformer   | medium |  300M  | A100 × 8     | 960h, BPE 3000 |
+
+Chain-of-Encoders (CoE) variants — same arch, with a `coe:` section enabling
+weight-shared multi-pass training (see § Chain-of-Encoders below):
+
+| Config                                | Arch          | Size   | Params | Hardware     | LibriSpeech    |
+| ------------------------------------- | ------------- | ------ | -----: | ------------ | -------------- |
+| `coe_transformer_30m_2080ti.yaml`     | CoE-Transformer | tiny |   30M  | 2080 Ti × 1  | 100h, BPE 300  |
+| `coe_transformer_120m_2080ti.yaml`    | CoE-Transformer | small |  120M | 2080 Ti × 1  | 100h, BPE 3000 |
+| `coe_transformer_120m_a100x4.yaml`    | CoE-Transformer | small |  120M | A100 × 4     | 960h, BPE 3000 |
+| `coe_conformer_30m_2080ti.yaml`       | CoE-Conformer | tiny   |   30M  | 2080 Ti × 1  | 100h, BPE 3000 |
+| `coe_conformer_120m_a100x4.yaml`      | CoE-Conformer | small  |  120M  | A100 × 4     | 960h, BPE 3000 |
+| `coe_conformer_300m_a100x8.yaml`      | CoE-Conformer | medium |  300M  | A100 × 8     | 960h, BPE 3000 |
+| `coe_zipformer_120m_a100x4.yaml`      | CoE-Zipformer | small  |  120M  | A100 × 4     | 960h, BPE 3000 |
+| `coe_zipformer_300m_a100x8.yaml`      | CoE-Zipformer | medium |  300M  | A100 × 8     | 960h, BPE 3000 |
 
 To add a new arch/size, drop another YAML next to these and run:
 ```bash
