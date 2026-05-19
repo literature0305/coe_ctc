@@ -1,5 +1,11 @@
 # coe-ctc — SOTA CTC ASR Baseline + Chain-of-Encoders on LibriSpeech
 
+<p align="center">
+  <img src="figure/COE.drawio.png" alt="Chain-of-Encoders (CoE) architecture" width="720">
+  <br>
+  <em>Chain-of-Encoders: one weight-shared encoder, M passes, cumulative time masking, inter-pass K/V concatenation.</em>
+</p>
+
 End-to-end CTC speech recognition on LibriSpeech (100h subset / 960h full /
 libri-light optional). The repo ships **two** training paths from the same
 encoder code:
@@ -8,7 +14,8 @@ encoder code:
    published SOTA numbers (see table below).
 2. **Chain-of-Encoders (CoE)** — a weight-shared, multi-pass encoder with a
    cumulative time-mask schedule and inter-pass K/V conditioning. This is the
-   proposed method for the accompanying paper.
+   proposed method for the accompanying paper (see § Chain-of-Encoders for
+   method details).
 
 | Reference framework | Borrowed style                                              |
 | ------------------- | ----------------------------------------------------------- |
