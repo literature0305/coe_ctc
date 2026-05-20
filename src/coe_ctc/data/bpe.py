@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -27,6 +28,24 @@ def default_bpe_path(data: str, vocab: int, *, root: str | os.PathLike = "downlo
     matching what :func:`train_bpe_parallel` writes.
     """
     return Path(root) / "bpe" / f"{data}_bpe{int(vocab)}" / "spm.model"
+
+
+_OUTPUT_DIR_BPE_RE = re.compile(r"_\d+bpe(?=$|/)")
+
+
+def rewrite_output_dir_bpe(output_dir: str, vocab: int) -> str:
+    """Rewrite the ``_<N>bpe`` suffix of a config-supplied ``output_dir`` to match
+    a user-overridden vocab size. Returns the input unchanged (with a warning) if
+    no such suffix is present — caller should use ``--output-dir`` instead.
+    """
+    new, n = _OUTPUT_DIR_BPE_RE.subn(f"_{int(vocab)}bpe", output_dir, count=1)
+    if n == 0:
+        logger.warning(
+            "output_dir=%r has no `_<N>bpe` suffix; --n_bpe=%d cannot be reflected "
+            "in the output path. Pass --output-dir to override explicitly.",
+            output_dir, int(vocab),
+        )
+    return new
 
 
 # ---------------------------------------------------------------------------

@@ -46,14 +46,25 @@ def get_world_size() -> int:
     return _env_int("WORLD_SIZE", 1)
 
 
+# Rank is cached after the first lookup because is_main_process() lands on the
+# inner training loop's hot path (~5 calls/step). `setup_distributed` clears
+# the cache so RANK env-var changes between calls are still picked up.
+_RANK_CACHE: int | None = None
+
+
 def get_rank() -> int:
+    global _RANK_CACHE
+    if _RANK_CACHE is not None:
+        return _RANK_CACHE
     try:
         import torch.distributed as dist
         if dist.is_available() and dist.is_initialized():
-            return dist.get_rank()
+            _RANK_CACHE = dist.get_rank()
+            return _RANK_CACHE
     except ImportError:
         pass
-    return _env_int("RANK", 0)
+    _RANK_CACHE = _env_int("RANK", 0)
+    return _RANK_CACHE
 
 
 def get_local_rank() -> int:
@@ -78,6 +89,8 @@ def setup_distributed(backend: str = "nccl") -> tuple[int, int, int]:
 
     Safe to call once at the top of the training entry. No-op on single GPU.
     """
+    global _RANK_CACHE
+    _RANK_CACHE = None
     import torch
 
     world_size = _env_int("WORLD_SIZE", 1)
@@ -99,6 +112,8 @@ def setup_distributed(backend: str = "nccl") -> tuple[int, int, int]:
 
 
 def teardown_distributed() -> None:
+    global _RANK_CACHE
+    _RANK_CACHE = None
     try:
         import torch.distributed as dist
 

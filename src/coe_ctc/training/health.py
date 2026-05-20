@@ -74,7 +74,6 @@ class HealthReporterConfig:
     interval_steps: int = 50
     log_dir: Optional[str] = None
     grad_window: int = 200          # rolling window for grad-norm stats
-    loss_history_max: int = 4000
     sparkline_window: int = 40
 
 
@@ -100,8 +99,9 @@ class TrainingHealthReporter:
         self.cfg = cfg
         self.max_steps = max(1, int(max_steps))
 
-        # Loss state
-        self.loss_history: deque[tuple[int, float]] = deque(maxlen=cfg.loss_history_max)
+        # Loss state — un-bounded so the LR / train-loss plots span the whole run.
+        self.loss_history: list[tuple[int, float]] = []
+        self.loss_ema_history: list[tuple[int, float, float]] = []  # (step, fast, slow)
         self.loss_ema_fast: float = float("nan")
         self.loss_ema_slow: float = float("nan")
         self.best_loss: float = float("inf")
@@ -116,8 +116,7 @@ class TrainingHealthReporter:
         self.nan_count: int = 0
         self.explosion_count: int = 0
 
-        # LR state
-        self.lr_history: deque[tuple[int, float]] = deque(maxlen=cfg.loss_history_max)
+        self.lr_history: list[tuple[int, float]] = []
         self.peak_lr: float = 0.0
 
         # Throughput
@@ -134,6 +133,8 @@ class TrainingHealthReporter:
         self.validation_seconds: float = 0.0
         self.visualization_seconds: float = 0.0
         self.save_seconds: float = 0.0
+        self.curriculum_seconds: float = 0.0
+        self.curriculum_rebuilds: int = 0
 
         # Validation stash
         self.last_benchmark: Optional[BenchmarkSnapshot] = None
@@ -213,6 +214,7 @@ class TrainingHealthReporter:
     def step_update(
         self,
         *,
+        step: int,
         loss: float,
         grad_norm: Optional[float],
         clipped: bool,
@@ -235,18 +237,19 @@ class TrainingHealthReporter:
 
         # Loss EMAs
         if _isfinite(loss):
-            self.loss_history.append((len(self.loss_history) + 1, float(loss)))
+            self.loss_history.append((int(step), float(loss)))
             self.loss_ema_fast = _ema(self.loss_ema_fast, loss, alpha=0.1)
             self.loss_ema_slow = _ema(self.loss_ema_slow, loss, alpha=0.01)
+            self.loss_ema_history.append((int(step), self.loss_ema_fast, self.loss_ema_slow))
             if loss < self.best_loss:
                 self.best_loss = float(loss)
-                self.best_loss_step = len(self.loss_history)
-            # Milestones every 100 steps if loss improved by >5%.
+                self.best_loss_step = int(step)
+            # Milestones every N steps if loss improved by >5%.
             if (
                 len(self.loss_history) % self._loss_milestone_interval == 0
                 and loss < self._last_milestone_loss * 0.95
             ):
-                self.loss_milestones.append((len(self.loss_history), float(loss)))
+                self.loss_milestones.append((int(step), float(loss)))
                 self._last_milestone_loss = float(loss)
 
         # Gradient stats
@@ -262,7 +265,7 @@ class TrainingHealthReporter:
             self.grad_count += 1
 
         # LR
-        self.lr_history.append((len(self.lr_history) + 1, float(lr)))
+        self.lr_history.append((int(step), float(lr)))
         if lr > self.peak_lr:
             self.peak_lr = float(lr)
 
@@ -297,6 +300,10 @@ class TrainingHealthReporter:
 
     def add_save_time(self, seconds: float) -> None:
         self.save_seconds += float(seconds)
+
+    def add_curriculum_time(self, seconds: float) -> None:
+        self.curriculum_seconds += float(seconds)
+        self.curriculum_rebuilds += 1
 
     # =====================================================================
     # Report emission
@@ -410,13 +417,21 @@ class TrainingHealthReporter:
 
         # ---------- Time Breakdown ----------
         lines.append(box_inner_top("Time Breakdown"))
-        total_known = self.train_seconds + self.validation_seconds + self.visualization_seconds + self.save_seconds
+        total_known = (
+            self.train_seconds + self.validation_seconds + self.visualization_seconds
+            + self.save_seconds + self.curriculum_seconds
+        )
         total = max(total_known, elapsed)
         def _pct(x): return 100.0 * x / max(1.0, total)
         lines.append(box_line(f"Training    : {format_duration(self.train_seconds):>10s}  ({_pct(self.train_seconds):5.1f}%)"))
         lines.append(box_line(f"Validation  : {format_duration(self.validation_seconds):>10s}  ({_pct(self.validation_seconds):5.1f}%)"))
         lines.append(box_line(f"Visualize   : {format_duration(self.visualization_seconds):>10s}  ({_pct(self.visualization_seconds):5.1f}%)"))
         lines.append(box_line(f"Save        : {format_duration(self.save_seconds):>10s}  ({_pct(self.save_seconds):5.1f}%)"))
+        curr_label = (
+            f"Curriculum  : {format_duration(self.curriculum_seconds):>10s}  "
+            f"({_pct(self.curriculum_seconds):5.1f}%)  rebuilds={self.curriculum_rebuilds}"
+        )
+        lines.append(box_line(curr_label))
         lines.append(box_line(f"Total       : {format_duration(elapsed):>10s}"))
         lines.append(box_inner_bottom())
 

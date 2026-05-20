@@ -236,39 +236,66 @@ class CtcDataModule:
         self.tokenizer: Optional[BpeTokenizer] = None
         if cfg.bpe_model:
             self.tokenizer = BpeTokenizer(cfg.bpe_model)
+        # Keep the unfiltered eager CutSet per part so curriculum rebuilds
+        # only re-apply the duration filter (no JSONL re-parse).
+        self._eager_cuts_cache: dict = {}
+        self._last_clamp_warn: tuple[int, int] | None = None
 
     # ----------------------------------------------------------------- core
-    def _load_cuts(self, part: str):
-        from lhotse import CutSet
+    def _eager_cuts(self, part: str):
+        if part not in self._eager_cuts_cache:
+            from lhotse import CutSet
 
-        path = Path(self.cfg.manifest_dir) / f"cuts_{part}.jsonl.gz"
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Expected cut manifest {path}. Did you run scripts/preprocess/run_preprocess.sh?"
-            )
-        cuts = CutSet.from_jsonl_lazy(str(path))
-        # filter by duration
-        if self.cfg.min_seconds > 0 or self.cfg.max_seconds > 0:
-            min_s = max(0.0, self.cfg.min_seconds)
-            max_s = self.cfg.max_seconds if self.cfg.max_seconds > 0 else float("inf")
-            cuts = cuts.filter(lambda c: min_s <= c.duration <= max_s)
-        # Materialize so we can index quickly inside the Dataset.
-        return cuts.to_eager()
+            path = Path(self.cfg.manifest_dir) / f"cuts_{part}.jsonl.gz"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Expected cut manifest {path}. Did you run scripts/preprocess/run_preprocess.sh?"
+                )
+            self._eager_cuts_cache[part] = CutSet.from_jsonl_lazy(str(path)).to_eager()
+        return self._eager_cuts_cache[part]
+
+    def _load_cuts(self, part: str, *, max_seconds_override: Optional[float] = None):
+        from coe_ctc.data.transforms import LengthFilter
+
+        min_s = max(0.0, self.cfg.min_seconds)
+        if max_seconds_override is not None:
+            max_s = max(min_s + 1e-6, float(max_seconds_override))
+        elif self.cfg.max_seconds > 0:
+            max_s = self.cfg.max_seconds
+        else:
+            max_s = float("inf")
+        return LengthFilter(min_seconds=min_s, max_seconds=max_s)(self._eager_cuts(part)).to_eager()
 
     def _make_sampler(self, cuts, *, shuffle: bool, drop_last: bool):
         from lhotse.dataset.sampling import DynamicBucketingSampler
 
+        # Lhotse requires num_buckets ≤ len(cuts); curriculum's narrow first phase
+        # (e.g. ≤2s on LibriSpeech) can leave fewer cuts than the configured buckets.
+        n_cuts = len(cuts)
+        n_buckets = max(1, min(self.cfg.num_buckets, n_cuts))
+        if n_buckets < self.cfg.num_buckets and self._last_clamp_warn != (n_cuts, n_buckets):
+            logger.warning(
+                "Only %d cuts in this slice; clamping num_buckets %d → %d. "
+                "If this is a curriculum phase, consider raising cl_schedule_len[0] "
+                "so the model sees more variety than a single mini-batch repeated.",
+                n_cuts, self.cfg.num_buckets, n_buckets,
+            )
+            self._last_clamp_warn = (n_cuts, n_buckets)
         return DynamicBucketingSampler(
             cuts,
             shuffle=shuffle,
             drop_last=drop_last,
             max_duration=self.cfg.max_duration,
-            num_buckets=self.cfg.num_buckets,
+            num_buckets=n_buckets,
         )
 
     def _make_loader(self, cuts, *, shuffle: bool, drop_last: bool) -> DataLoader:
         if self.tokenizer is None:
             raise RuntimeError("BPE model not configured.")
+        # A slice too small to fill one max_duration batch would yield zero
+        # batches under drop_last=True; keep the partial batch in that case.
+        if drop_last and sum(c.duration for c in cuts) < self.cfg.max_duration:
+            drop_last = False
         sampler = self._make_sampler(cuts, shuffle=shuffle, drop_last=drop_last)
         # Build a small wrapper Dataset that consults the sampler.
         dataset = CtcDataset(cuts, self.tokenizer)
@@ -283,15 +310,26 @@ class CtcDataModule:
         return loader
 
     # ----------------------------------------------------------------- API
-    def train_loader(self) -> DataLoader:
+    def train_loader(self, *, max_seconds_override: Optional[float] = None) -> DataLoader:
+        """Build the training DataLoader.
+
+        ``max_seconds_override`` is used by curriculum learning to cap utterance
+        duration for a given phase; pass ``None`` to use ``data.max_seconds``.
+        """
         all_train = None
         from lhotse import CutSet
 
         for part in self.cfg.train_parts:
-            cuts = self._load_cuts(part)
+            cuts = self._load_cuts(part, max_seconds_override=max_seconds_override)
             all_train = cuts if all_train is None else CutSet.from_cuts(list(all_train) + list(cuts))
         if all_train is None:
             raise RuntimeError("No train parts configured.")
+        if len(all_train) == 0:
+            cap = max_seconds_override if max_seconds_override is not None else self.cfg.max_seconds
+            raise RuntimeError(
+                f"No training cuts after filtering to [{self.cfg.min_seconds}, {cap}]s. "
+                "Check data.min_seconds / data.max_seconds and curriculum.cl_schedule_len."
+            )
         return self._make_loader(all_train, shuffle=self.cfg.shuffle, drop_last=self.cfg.drop_last)
 
     def valid_loader(self) -> DataLoader:

@@ -36,6 +36,11 @@ data:
   pin_memory: true
   persistent_workers: true
 
+curriculum:
+  # Train short utterances first; rebuild loader at each boundary. Empty lists = off.
+  cl_schedule_len:  [2, 4, 8]
+  cl_schedule_step: [1000, 2000, 4000]
+
 optim:
   name: adamw
   lr: 1.5e-3
@@ -60,7 +65,7 @@ checkpoint:
   top_k: 10
 
 validation:
-  every_epochs: 1
+  every_steps: 1000
   num_samples: 10
 
 health:

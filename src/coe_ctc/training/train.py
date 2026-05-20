@@ -35,7 +35,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from coe_ctc.data.bpe import default_bpe_path
+from coe_ctc.data.bpe import default_bpe_path, rewrite_output_dir_bpe
 from coe_ctc.data.datamodule import CtcDataModule, DataModuleConfig
 from coe_ctc.data.librispeech import DATASETS, manifest_prefix_for
 from coe_ctc.data.transforms import SpecAugment, SpecAugmentConfig, PerUtteranceMVN
@@ -45,6 +45,7 @@ from coe_ctc.training.checkpoint import (
     load_checkpoint,
     save_checkpoint,
 )
+from coe_ctc.training.curriculum import oom_preflight, parse_curriculum_config
 from coe_ctc.training.health import (
     HealthReporterConfig,
     TrainingHealthReporter,
@@ -105,16 +106,41 @@ def _human_int(n: int) -> str:
     return f"{n:,}"
 
 
+def _encoder_hparams(encoder: nn.Module, arch: str) -> dict:
+    """Pull the displayed-in-banner hyperparameters from the encoder."""
+    h: dict = {}
+    for attr, label in (
+        ("num_features", "num_features"),
+        ("d_model", "d_model"),
+        ("num_layers", "num_layers"),
+        ("num_heads", "num_heads"),
+        ("d_ff", "d_ff"),
+        ("dropout_p", "dropout"),
+        ("attn_dropout_p", "attn_dropout"),
+    ):
+        if hasattr(encoder, attr):
+            h[label] = getattr(encoder, attr)
+    if arch in ("conformer", "zipformer") and hasattr(encoder, "kernel_size"):
+        h["kernel_size"] = encoder.kernel_size
+    if arch == "zipformer":
+        for attr in ("downsampling_factors", "num_layers_per_stack"):
+            if hasattr(encoder, attr):
+                h[attr] = getattr(encoder, attr)
+    return h
+
+
 def _summarize_model(model: nn.Module, arch: str, size: str, vocab_size: int) -> dict:
     total = sum(p.numel() for p in model.parameters() if p.requires_grad)
     parts = {}
     for name, mod in model.named_children():
         parts[name] = sum(p.numel() for p in mod.parameters())
-    s = {
-        "Architecture": f"{arch} / {size}",
-        "Parameters": f"{_human_int(total)} (~{total/1e6:.1f}M)",
-        "Vocab size": f"{vocab_size}",
-    }
+    s: dict = {"Architecture": f"{arch} / {size}"}
+    encoder = getattr(model, "encoder", None)
+    if encoder is not None:
+        for k, v in _encoder_hparams(encoder, arch).items():
+            s[k] = str(v)
+    s["Parameters"] = f"{_human_int(total)} (~{total/1e6:.1f}M)"
+    s["Vocab size"] = f"{vocab_size}"
     for k, v in parts.items():
         s[f"  {k}"] = f"{_human_int(v)}  ({100*v/total:.1f}%)"
     return s
@@ -142,6 +168,9 @@ def main(argv: list[str] | None = None) -> int:
         cfg.setdefault("data", {})["num_workers"] = args.num_workers
     if args.n_bpe is not None:
         cfg.setdefault("data", {})["bpe_model"] = str(_REPO_ROOT / default_bpe_path(args.data, args.n_bpe))
+        cur_out = cfg.get("output_dir")
+        if isinstance(cur_out, str):
+            cfg["output_dir"] = rewrite_output_dir_bpe(cur_out, args.n_bpe)
     if args.output_dir is not None:
         cfg["output_dir"] = args.output_dir
     if args.seed is not None:
@@ -186,9 +215,16 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(f"Manifest dir: {dm_cfg.manifest_dir}")
     logger.info(f"BPE model   : {dm_cfg.bpe_model}")
 
+    # ----- Curriculum learning (optional) -----
+    curriculum = parse_curriculum_config(cfg.get("curriculum"))
+    curriculum.validate(min_seconds=dm_cfg.min_seconds, max_seconds=dm_cfg.max_seconds)
+    logger.info("Curriculum  : %s", curriculum.describe(fallback=dm_cfg.max_seconds))
+
+    def _loader_cap(step_: int) -> float:
+        return curriculum.max_seconds_for(step_, fallback=dm_cfg.max_seconds)
+
     with main_process_first():
         dm = CtcDataModule(dm_cfg)
-        train_loader = dm.train_loader()
         valid_loader = dm.valid_loader()
     assert dm.tokenizer is not None
     vocab_size = dm.tokenizer.vocab_size
@@ -251,6 +287,11 @@ def main(argv: list[str] | None = None) -> int:
         )
     raw_model = unwrap_model(model)
 
+    if is_main_process():
+        arch_dump = output_dir / "model_arch.txt"
+        arch_dump.write_text(str(raw_model))
+        logger.info(f"Model arch  : dumped to {arch_dump}")
+
     spec_aug = None if is_coe else SpecAugment(sa_cfg).to(device)
     mvn = PerUtteranceMVN().to(device) if dm_cfg.per_utt_mvn else None
 
@@ -292,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     top_k_mgr = TopKCheckpointManager(output_dir / "best_checkpoints", top_k=int(ckpt_cfg.get("top_k", 5)))
     rolling_keep = int(ckpt_cfg.get("rolling_keep", 3))
     save_every_steps = int(ckpt_cfg.get("save_every_steps", 2000))
-    validate_every_epochs = int(val_cfg.get("every_epochs", 1))
+    validate_every_steps = int(val_cfg.get("every_steps", 1000))
 
     # ----- TensorBoard -----
     tb_writer = None
@@ -347,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
                 "Bucket max_dur": f"{dm_cfg.max_duration}s",
                 "Num buckets": str(dm_cfg.num_buckets),
                 "SpecAugment": sa_label,
+                "Curriculum": curriculum.describe(fallback=dm_cfg.max_seconds),
             },
             optim_summary={
                 "Optimizer": ocfg.name,
@@ -368,16 +410,79 @@ def main(argv: list[str] | None = None) -> int:
                 "Health steps": str(hcfg.interval_steps),
                 "Save steps": str(save_every_steps),
                 "Top-K ckpts": str(top_k_mgr.top_k),
-                "Valid every": f"{validate_every_epochs} epoch(s)",
+                "Valid every": f"{validate_every_steps} step(s)",
                 "Output dir": str(output_dir),
                 "TensorBoard": "on" if tb_writer is not None else "off",
             },
         )
 
+    # ----- Build initial training loader (post-resume → correct curriculum phase) -----
+    loader_cap = _loader_cap(step)
+    _t = time.time()
+    with main_process_first():
+        train_loader = dm.train_loader(max_seconds_override=loader_cap)
+    _build_sec = time.time() - _t
+    if curriculum.is_active():
+        health.add_curriculum_time(_build_sec)
+        logger.info(
+            f"[curriculum] initial train loader: step={step}, cap=≤{loader_cap:g}s "
+            f"(built in {_build_sec*1000:.1f} ms)"
+        )
+
     if args.dry_run:
-        logger.info("[dry-run] exiting before training loop.")
+        logger.info("[dry-run] exiting before training loop (skipping OOM pre-flight).")
         teardown_distributed()
         return 0
+
+    # Curriculum starts on short utterances, so a real OOM wouldn't show up
+    # until the last phase boundary. Probe worst-case shape now instead.
+    try:
+        oom_preflight(
+            model=raw_model,
+            device=device,
+            num_features=int(cfg.get("data", {}).get("num_features", 80)),
+            max_seconds=float(dm_cfg.max_seconds),
+            max_duration=float(dm_cfg.max_duration),
+            vocab_size=vocab_size,
+            blank_idx=int(mcfg.get("blank_idx", 0)),
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+            grad_accum_steps=grad_accum_steps,
+            mvn=mvn,
+            spec_aug=spec_aug,
+        )
+    except torch.cuda.OutOfMemoryError:
+        teardown_distributed()
+        raise
+
+    # ----- Validation closure (step- or epoch-triggered) -----
+    def _run_validation() -> None:
+        t0 = time.time()
+        snap = validator.run(
+            raw_model, valid_loader, step=step, epoch=epoch,
+            use_amp=use_amp, amp_dtype=amp_dtype,
+        )
+        health.add_validation_time(time.time() - t0)
+        health.record_benchmark(snap)
+        top_k_mgr.consider(step=step, wer=snap.wer, model=raw_model, config=cfg)
+        t1 = time.time()
+        render_validation_plots(
+            history=validator.history,
+            lr_history=health.lr_history,
+            loss_history=health.loss_history,
+            loss_ema_history=health.loss_ema_history,
+            output_dir=output_dir,
+        )
+        health.add_visualization_time(time.time() - t1)
+        if tb_writer is not None:
+            tb_writer.add_scalar("valid/wer", snap.wer, step)
+            tb_writer.add_scalar("valid/cer", snap.cer, step)
+            tb_writer.add_scalar("valid/loss", snap.loss, step)
+            last_row = validator.history[-1]
+            for r in last_row.get("per_pass") or []:
+                tb_writer.add_scalar(f"valid/wer/m={r['m']}", r["wer"], step)
+                tb_writer.add_scalar(f"valid/cer/m={r['m']}", r["cer"], step)
+                tb_writer.add_scalar(f"valid/loss/m={r['m']}", r["loss"], step)
 
     # ----- Training loop -----
     model.train()
@@ -388,8 +493,23 @@ def main(argv: list[str] | None = None) -> int:
 
     while step < max_steps:
         epoch += 1
+        # Curriculum may have advanced during the previous validation block.
+        if curriculum.is_active() and _loader_cap(step) != loader_cap:
+            loader_cap = _loader_cap(step)
+            _t = time.time()
+            train_loader = dm.train_loader(max_seconds_override=loader_cap)
+            _build_sec = time.time() - _t
+            health.add_curriculum_time(_build_sec)
+            if is_main_process():
+                logger.info(
+                    f"[curriculum] rebuilt loader for cap=≤{loader_cap:g}s in "
+                    f"{_build_sec*1000:.1f} ms (total curriculum time: "
+                    f"{health.curriculum_seconds*1000:.1f} ms across "
+                    f"{health.curriculum_rebuilds} rebuilds)"
+                )
         if is_main_process():
-            logger.info(f"==================== Epoch {epoch} start ====================")
+            tag = f" (curriculum cap: ≤{loader_cap:g}s)" if curriculum.is_active() else ""
+            logger.info(f"==================== Epoch {epoch} start{tag} ====================")
         # Lhotse DynamicBucketingSampler is single-pass; we re-instantiate via re-iteration.
         for batch in train_loader:
             features = batch["features"].to(device, non_blocking=True)
@@ -448,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
             pad_ratio = pad_frames / max(1, total_grid)
 
             health.step_update(
+                step=step,
                 loss=accum_loss / max(1, accum_count),
                 grad_norm=grad_norm,
                 clipped=clipped,
@@ -500,50 +621,20 @@ def main(argv: list[str] | None = None) -> int:
                         pass
                 health.add_save_time(time.time() - t0)
 
+            if validate_every_steps > 0 and step % validate_every_steps == 0 and is_main_process():
+                _run_validation()
+
             if step >= max_steps:
                 break
 
-        # ── End of epoch — validation ──
-        if (epoch % validate_every_epochs == 0) and is_main_process():
-            t0 = time.time()
-            snap = validator.run(
-                raw_model,
-                valid_loader,
-                step=step,
-                epoch=epoch,
-                use_amp=use_amp,
-                amp_dtype=amp_dtype,
-            )
-            health.add_validation_time(time.time() - t0)
-            health.record_benchmark(snap)
-
-            # Top-K best
-            top_k_mgr.consider(
-                step=step,
-                wer=snap.wer,
-                model=raw_model,
-                config=cfg,
-            )
-
-            # Plots
-            t1 = time.time()
-            render_validation_plots(
-                history=validator.history,
-                lr_history=list(health.lr_history),
-                output_dir=output_dir,
-            )
-            health.add_visualization_time(time.time() - t1)
-
-            # TensorBoard
-            if tb_writer is not None:
-                tb_writer.add_scalar("valid/wer", snap.wer, step)
-                tb_writer.add_scalar("valid/cer", snap.cer, step)
-                tb_writer.add_scalar("valid/loss", snap.loss, step)
-                last_row = validator.history[-1]
-                for r in last_row.get("per_pass") or []:
-                    tb_writer.add_scalar(f"valid/wer/m={r['m']}", r["wer"], step)
-                    tb_writer.add_scalar(f"valid/cer/m={r['m']}", r["cer"], step)
-                    tb_writer.add_scalar(f"valid/loss/m={r['m']}", r["loss"], step)
+            # Curriculum phase change → exit inner loop so the outer rebuilds the loader.
+            if curriculum.is_active() and _loader_cap(step) != loader_cap:
+                if is_main_process():
+                    logger.info(
+                        f"[curriculum] step={step}: advancing phase "
+                        f"≤{loader_cap:g}s → ≤{_loader_cap(step):g}s; rebuilding loader."
+                    )
+                break
 
     if is_main_process():
         logger.info("Training complete.")

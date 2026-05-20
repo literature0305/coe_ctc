@@ -32,7 +32,7 @@ data:
   max_duration: 360.0            # baseline 100 / M=4
   num_buckets: 30
   min_seconds: 1.0
-  max_seconds: 17.0
+  max_seconds: 24.0
   apply_spec_augment: false
   spec_aug_num_freq_masks: 2
   spec_aug_freq_mask_param: 27
@@ -44,9 +44,14 @@ data:
   pin_memory: true
   persistent_workers: true
 
+curriculum:
+  # Train short utterances first; rebuild loader at each boundary. Empty lists = off.
+  cl_schedule_len: [8, 10, 12, 14, 16] # [8, 12, 16] # 
+  cl_schedule_step: [100, 200, 400, 800, 1600] # [200, 1000, 4000] # 
+
 optim:
   name: adamw
-  lr: 2.5e-3
+  lr: 0.1e-3
   betas: [0.9, 0.98]
   eps: 1.0e-9
   weight_decay: 1.0e-2
@@ -68,7 +73,7 @@ checkpoint:
   top_k: 5
 
 validation:
-  every_epochs: 1
+  every_steps: 1000
   num_samples: 10
 
 health:

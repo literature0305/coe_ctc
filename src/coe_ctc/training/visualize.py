@@ -4,6 +4,7 @@ Produces these files under ``<output_dir>/plots/``:
   * ``valid_wer.png``   — WER vs step, with best-so-far line
   * ``valid_cer.png``   — CER vs step, with best-so-far line
   * ``valid_loss.png``  — validation loss vs step
+  * ``train_loss.png``  — training loss vs step (raw + precomputed EMAs)
   * ``lr.png``          — learning-rate schedule
 
 Plots are regenerated on every call; cheap enough that we can afford to do
@@ -14,9 +15,14 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 logger = logging.getLogger(__name__)
+
+# Cap plotted points per series. Matplotlib chokes on hundreds-of-thousands
+# of points (multi-MB PNG, multi-second render); subsampling keeps the curve
+# shape intact and the file small.
+_MAX_PLOT_POINTS = 6000
 
 
 def _running_min(xs: list[float]) -> list[float]:
@@ -29,11 +35,21 @@ def _running_min(xs: list[float]) -> list[float]:
     return out
 
 
+def _subsample(xs: Sequence) -> Sequence:
+    n = len(xs)
+    if n <= _MAX_PLOT_POINTS:
+        return xs
+    stride = max(1, n // _MAX_PLOT_POINTS)
+    return xs[::stride]
+
+
 def render_validation_plots(
     *,
     history: list[dict],
     lr_history: list[tuple[int, float]],
     output_dir: str | Path,
+    loss_history: list[tuple[int, float]] | None = None,
+    loss_ema_history: list[tuple[int, float, float]] | None = None,
 ) -> None:
     """Write the 4 PNGs from the accumulated validation history.
 
@@ -95,8 +111,9 @@ def render_validation_plots(
         _plot("loss", "loss", "Validation loss", "valid_loss.png", "C4")
 
     if lr_history:
-        steps = [s for s, _ in lr_history]
-        lrs = [v for _, v in lr_history]
+        sampled = _subsample(lr_history)
+        steps = [s for s, _ in sampled]
+        lrs = [v for _, v in sampled]
         fig, ax = plt.subplots(figsize=(8, 4.5))
         ax.plot(steps, lrs, color="C5")
         ax.set_xlabel("step")
@@ -106,4 +123,26 @@ def render_validation_plots(
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(str(output_dir / "lr.png"), dpi=120)
+        plt.close(fig)
+
+    if loss_history:
+        sampled_loss = _subsample(loss_history)
+        steps = [s for s, _ in sampled_loss]
+        losses = [v for _, v in sampled_loss]
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        ax.plot(steps, losses, color="C0", alpha=0.25, linewidth=0.8, label="raw")
+        if loss_ema_history:
+            sampled_ema = _subsample(loss_ema_history)
+            ema_steps = [s for s, _, _ in sampled_ema]
+            ema_fast = [f for _, f, _ in sampled_ema]
+            ema_slow = [s for _, _, s in sampled_ema]
+            ax.plot(ema_steps, ema_fast, color="C0", linewidth=1.4, label="EMA α=0.1")
+            ax.plot(ema_steps, ema_slow, color="C3", linewidth=1.4, label="EMA α=0.01")
+        ax.set_xlabel("step")
+        ax.set_ylabel("CTC loss")
+        ax.set_title("Training loss")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(str(output_dir / "train_loss.png"), dpi=120)
         plt.close(fig)

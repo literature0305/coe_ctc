@@ -104,6 +104,10 @@ class TransformerEncoder(nn.Module):
         super().__init__()
         self.num_features = num_features
         self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.dropout_p = dropout
+        self.attn_dropout_p = attn_dropout
         self.subsampling = Conv2dSubsampling(num_features, d_model, dropout=subsampling_dropout)
         self.pos_enc = SinusoidalPositionalEncoding(d_model, dropout=dropout)
         self.layers = nn.ModuleList(

@@ -200,6 +200,13 @@ class ZipformerEncoder(nn.Module):
 
         self.num_features = num_features
         self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.kernel_size = kernel_size
+        self.dropout_p = dropout
+        self.attn_dropout_p = attn_dropout
+        self.downsampling_factors = tuple(downsampling_factors)
+        self.num_layers_per_stack = tuple(num_layers_per_stack)
         self.subsampling = Conv2dSubsampling(num_features, d_model, dropout=subsampling_dropout)
         self.rel_pos = RelPositionalEncoding(d_model, dropout=dropout)
 
